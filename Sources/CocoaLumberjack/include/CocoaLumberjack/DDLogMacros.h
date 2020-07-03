@@ -38,27 +38,31 @@
  * These are the two macros that all other macros below compile into.
  * These big multiline macros makes all the other macros easier to read.
  **/
-#define LOG_MACRO(isAsynchronous, lvl, flg, ctx, atag, fnct, frmt, ...) \
-        [DDLog log : isAsynchronous                                     \
-             level : lvl                                                \
-              flag : flg                                                \
-           context : ctx                                                \
-              file : __FILE__                                           \
-          function : fnct                                               \
-              line : __LINE__                                           \
-               tag : atag                                               \
-            format : (frmt), ## __VA_ARGS__]
+#define LOG_MACRO(isAsynchronous, lvl, flg, ctx, atag, fnct, frmt, ...)                 \
+    @autoreleasepool {                                                                  \
+        [DDLog log : isAsynchronous                                                     \
+             level : lvl                                                                \
+              flag : flg                                                                \
+           context : ctx                                                                \
+              file : __FILE__                                                           \
+          function : fnct                                                               \
+              line : __LINE__                                                           \
+               tag : atag                                                               \
+            format : (frmt), ## __VA_ARGS__];                                           \
+    }
 
 #define LOG_MACRO_TO_DDLOG(ddlog, isAsynchronous, lvl, flg, ctx, atag, fnct, frmt, ...) \
-        [ddlog log : isAsynchronous                                     \
-             level : lvl                                                \
-              flag : flg                                                \
-           context : ctx                                                \
-              file : __FILE__                                           \
-          function : fnct                                               \
-              line : __LINE__                                           \
-               tag : atag                                               \
-            format : (frmt), ## __VA_ARGS__]
+    @autoreleasepool {                                                                  \
+        [ddlog log : isAsynchronous                                                     \
+             level : lvl                                                                \
+              flag : flg                                                                \
+           context : ctx                                                                \
+              file : __FILE__                                                           \
+          function : fnct                                                               \
+              line : __LINE__                                                           \
+               tag : atag                                                               \
+            format : (frmt), ## __VA_ARGS__];                                           \
+    }
 
 /**
  * Define version of the macro that only execute if the log level is above the threshold.
