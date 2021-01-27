@@ -71,14 +71,6 @@ NSTimeInterval     const kDDRollingLeeway              = 1.0;              // 1s
 @synthesize maximumNumberOfLogFiles = _maximumNumberOfLogFiles;
 @synthesize logFilesDiskQuota = _logFilesDiskQuota;
 
-+ (BOOL)automaticallyNotifiesObserversForKey:(NSString *)theKey {
-    if ([theKey isEqualToString:@"maximumNumberOfLogFiles"] || [theKey isEqualToString:@"logFilesDiskQuota"]) {
-        return NO;
-    } else {
-        return [super automaticallyNotifiesObserversForKey:theKey];
-    }
-}
-
 - (instancetype)init {
     return [self initWithLogsDirectory:nil];
 }
@@ -98,11 +90,6 @@ NSTimeInterval     const kDDRollingLeeway              = 1.0;              // 1s
         } else {
             _logsDirectory = [[self defaultLogsDirectory] copy];
         }
-
-        NSKeyValueObservingOptions kvoOptions = NSKeyValueObservingOptionOld | NSKeyValueObservingOptionNew;
-
-        [self addObserver:self forKeyPath:NSStringFromSelector(@selector(maximumNumberOfLogFiles)) options:kvoOptions context:nil];
-        [self addObserver:self forKeyPath:NSStringFromSelector(@selector(logFilesDiskQuota)) options:kvoOptions context:nil];
 
         NSLogVerbose(@"DDFileLogManagerDefault: logsDirectory:\n%@", [self logsDirectory]);
         NSLogVerbose(@"DDFileLogManagerDefault: sortedLogFileNames:\n%@", [self sortedLogFileNames]);
@@ -129,40 +116,28 @@ NSTimeInterval     const kDDRollingLeeway              = 1.0;              // 1s
 
 #endif
 
-- (void)dealloc {
-    // try-catch because the observer might be removed or never added. In this case, removeObserver throws an exception
-    @try {
-        [self removeObserver:self forKeyPath:NSStringFromSelector(@selector(maximumNumberOfLogFiles))];
-        [self removeObserver:self forKeyPath:NSStringFromSelector(@selector(logFilesDiskQuota))];
-    } @catch (NSException *exception) {
+- (void)deleteOldFilesForConfigurationChange {
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        @autoreleasepool {
+            // See method header for queue reasoning.
+            [self deleteOldLogFiles];
+        }
+    });
+}
+
+- (void)setLogFilesDiskQuota:(unsigned long long)logFilesDiskQuota {
+    if (_logFilesDiskQuota != logFilesDiskQuota) {
+        _logFilesDiskQuota = logFilesDiskQuota;
+        NSLogInfo(@"DDFileLogManagerDefault: Responding to configuration change: logFilesDiskQuota");
+        [self deleteOldFilesForConfigurationChange];
     }
 }
 
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-#pragma mark Configuration
-////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-- (void)observeValueForKeyPath:(NSString *)keyPath
-                      ofObject:(__unused id)object
-                        change:(NSDictionary *)change
-                       context:(__unused void *)context {
-    NSNumber *old = change[NSKeyValueChangeOldKey];
-    NSNumber *new = change[NSKeyValueChangeNewKey];
-
-    if ([old isEqual:new]) {
-        return;
-    }
-
-    if ([keyPath isEqualToString:NSStringFromSelector(@selector(maximumNumberOfLogFiles))] ||
-        [keyPath isEqualToString:NSStringFromSelector(@selector(logFilesDiskQuota))]) {
-        NSLogInfo(@"DDFileLogManagerDefault: Responding to configuration change: %@", keyPath);
-
-        dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-            @autoreleasepool {
-                // See method header for queue reasoning.
-                [self deleteOldLogFiles];
-            }
-        });
+- (void)setMaximumNumberOfLogFiles:(NSUInteger)maximumNumberOfLogFiles {
+    if (_maximumNumberOfLogFiles != maximumNumberOfLogFiles) {
+        _maximumNumberOfLogFiles = maximumNumberOfLogFiles;
+        NSLogInfo(@"DDFileLogManagerDefault: Responding to configuration change: maximumNumberOfLogFiles");
+        [self deleteOldFilesForConfigurationChange];
     }
 }
 
@@ -650,9 +625,21 @@ NSTimeInterval     const kDDRollingLeeway              = 1.0;              // 1s
 - (void)lt_cleanup {
     NSAssert([self isOnInternalLoggerQueue], @"lt_ methods should be on logger queue.");
 
-    [_currentLogFileHandle synchronizeFile];
-    [_currentLogFileHandle closeFile];
-
+    if (@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)) {
+        __autoreleasing NSError *error;
+        BOOL synchronized = [_currentLogFileHandle synchronizeAndReturnError:&error];
+        if (!synchronized) {
+            NSLogError(@"DDFileLogger: Failed to synchronize file: %@", error);
+        }
+        BOOL closed = [_currentLogFileHandle closeAndReturnError:&error];
+        if (!closed) {
+            NSLogError(@"DDFileLogger: Failed to close file: %@", error);
+        }
+    } else {
+        [_currentLogFileHandle synchronizeFile];
+        [_currentLogFileHandle closeFile];
+    }
+        
     if (_currentLogFileVnode) {
         dispatch_source_cancel(_currentLogFileVnode);
         _currentLogFileVnode = NULL;
@@ -885,9 +872,21 @@ NSTimeInterval     const kDDRollingLeeway              = 1.0;              // 1s
     if (_currentLogFileHandle == nil) {
         return;
     }
-
-    [_currentLogFileHandle synchronizeFile];
-    [_currentLogFileHandle closeFile];
+    
+    if (@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)) {
+        __autoreleasing NSError *error;
+        BOOL synchronized = [_currentLogFileHandle synchronizeAndReturnError:&error];
+        if (!synchronized) {
+            NSLogError(@"DDFileLogger: Failed to synchronize file: %@", error);
+        }
+        BOOL closed = [_currentLogFileHandle closeAndReturnError:&error];
+        if (!closed) {
+            NSLogError(@"DDFileLogger: Failed to close file: %@", error);
+        }
+    } else {
+        [_currentLogFileHandle synchronizeFile];
+        [_currentLogFileHandle closeFile];
+    }
     _currentLogFileHandle = nil;
 
     _currentLogFileInfo.isArchived = YES;
@@ -947,7 +946,17 @@ NSTimeInterval     const kDDRollingLeeway              = 1.0;              // 1s
     // We specifically wrote our own getter/setter method to allow us to do this (for performance reasons).
 
     if (_maximumFileSize > 0) {
-        unsigned long long fileSize = [_currentLogFileHandle offsetInFile];
+        unsigned long long fileSize;
+        if (@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)) {
+            __autoreleasing NSError *error;
+            BOOL succeed = [_currentLogFileHandle getOffset:&fileSize error:&error];
+            if (!succeed) {
+                NSLogError(@"DDFileLogger: Failed to get offset: %@", error);
+                return;
+            }
+        } else {
+            fileSize = [_currentLogFileHandle offsetInFile];
+        }
 
         if (fileSize >= _maximumFileSize) {
             NSLogVerbose(@"DDFileLogger: Rolling log file due to size (%qu)...", fileSize);
@@ -964,9 +973,7 @@ NSTimeInterval     const kDDRollingLeeway              = 1.0;              // 1s
 - (BOOL)lt_shouldLogFileBeArchived:(DDLogFileInfo *)mostRecentLogFileInfo {
     NSAssert([self isOnInternalLoggerQueue], @"lt_ methods should be on logger queue.");
 
-    if (mostRecentLogFileInfo.isArchived) {
-        return NO;
-    } else if ([self shouldArchiveRecentLogFileInfo:mostRecentLogFileInfo]) {
+    if ([self shouldArchiveRecentLogFileInfo:mostRecentLogFileInfo]) {
         return YES;
     } else if (_maximumFileSize > 0 && mostRecentLogFileInfo.fileSize >= _maximumFileSize) {
         return YES;
@@ -984,7 +991,7 @@ NSTimeInterval     const kDDRollingLeeway              = 1.0;              // 1s
     // If previous log was created when app wasn't running in background, but now it is - we archive it and create
     // a new one.
     //
-    // If user has overwritten to NSFileProtectionNone there is no neeed to create a new one.
+    // If user has overwritten to NSFileProtectionNone there is no need to create a new one.
     if (doesAppRunInBackground()) {
         NSFileProtectionType key = mostRecentLogFileInfo.fileAttributes[NSFileProtectionKey];
         BOOL isUntilFirstAuth = [key isEqualToString:NSFileProtectionCompleteUntilFirstUserAuthentication];
@@ -1144,7 +1151,15 @@ NSTimeInterval     const kDDRollingLeeway              = 1.0;              // 1s
     if (!_currentLogFileHandle) {
         NSString *logFilePath = [[self lt_currentLogFileInfo] filePath];
         _currentLogFileHandle = [NSFileHandle fileHandleForWritingAtPath:logFilePath];
-        [_currentLogFileHandle seekToEndOfFile];
+        if (@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)) {
+            __autoreleasing NSError *error;
+            BOOL succeed = [_currentLogFileHandle seekToEndReturningOffset:nil error:&error];
+            if (!succeed) {
+                NSLogError(@"DDFileLogger: Failed to seek to end of file: %@", error);
+            }
+        } else {
+            [_currentLogFileHandle seekToEndOfFile];
+        }
 
         if (_currentLogFileHandle) {
             [self lt_scheduleTimerToRollLogFileDueToAge];
@@ -1215,7 +1230,15 @@ static int exception_count = 0;
 
 - (void)lt_flush {
     NSAssert([self isOnInternalLoggerQueue], @"flush should only be executed on internal queue.");
-    [_currentLogFileHandle synchronizeFile];
+    if (@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)) {
+        __autoreleasing NSError *error;
+        BOOL succeed = [_currentLogFileHandle synchronizeAndReturnError:&error];
+        if (!succeed) {
+            NSLogError(@"DDFileLogger: Failed to synchronize file: %@", error);
+        }
+    } else {
+        [_currentLogFileHandle synchronizeFile];
+    }
 }
 
 - (DDLoggerName)loggerName {
@@ -1295,8 +1318,20 @@ static int exception_count = 0;
         }
 
         NSFileHandle *handle = [self lt_currentLogFileHandle];
-        [handle seekToEndOfFile];
-        [handle writeData:data];
+        if (@available(macOS 10.15, iOS 13.0, tvOS 13.0, watchOS 6.0, *)) {
+            __autoreleasing NSError *error;
+            BOOL sought = [handle seekToEndReturningOffset:nil error:&error];
+            if (!sought) {
+                NSLogError(@"DDFileLogger: Failed to seek to end of file: %@", error);
+            }
+            BOOL written =  [handle writeData:data error:&error];
+            if (!written) {
+                NSLogError(@"DDFileLogger: Failed to write data: %@", error);
+            }
+        } else {
+            [handle seekToEndOfFile];
+            [handle writeData:data];
+        }
 
         if (implementsDeprecatedDidLog) {
 #pragma clang diagnostic push
